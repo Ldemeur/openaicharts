@@ -74,10 +74,11 @@ def main():
         try:
             res_data = json.loads(res_str)
         except:
+            messages.append({'role': 'assistant', 'content': str(res_str)})
             messages.append({'role': 'system', 'content': 'invalid json'})
             continue
 
-        if 'comment' in res:
+        if 'comment' in res_data:
             print(res_data['comment'])
         if 'python' in res_data:
             print(res_data['python'])
