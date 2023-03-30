@@ -15,7 +15,7 @@ PROMPT = "You are a creative rockstar data scientist. Your task is to analyse a 
     "So start with { ... etc"
 
 
-openai.api_key = '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'
+openai.api_key = 'sk-...'
 
 
 Prompt = List[Dict[str, str]]
