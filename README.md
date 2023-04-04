@@ -1,4 +1,6 @@
 # Automatic Data Scientist - Prototype
+![Screenshot of the program running](./screenshot.png)
+
 *In GPT-4's own words:*
 
 This project demonstrates an automatic data scientist powered by the GPT-4 language model. The primary goal is to perform data analysis autonomously by executing a series of Python commands. The user is only involved in checking the generated Python code for security reasons before execution.
