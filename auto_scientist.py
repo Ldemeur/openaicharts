@@ -1,138 +1,145 @@
-import io
-import json
-import sys
-from typing import List, Dict
-
-import os
+import datetime
 import hashlib
-import shelve
-import pickle
+import json
+import os
+from typing import List
 
-import openai
+from utils import Prompt, chat_api, capture_output
 
-PROMPT = "You are a creative rockstar data scientist. Your task is to analyse a data source, this is a file" \
-    "Called food-enforcement.json you can execute python commands only. For example start by printing" \
-    "A few lines of the file, then read them, and start running code as you choose.\n" \
-    "Each of your outputs should be in strictly in json format. Your json should have two keys: " \
-    "'comment': Should be a pretty short comment about what you are doing or what you are finding out. " \
-    "Remember to keep it short even feel free to leave it empty if you are nothing interesting to say." \
-    "'python' or 'shell': Should be a string containing a valid python or shell code including imports if needed" \
-    "max 1000 characters of the results will be returned to you, might be an error in which case you should correct" \
-    "Yourself by writing better code, when that happens. Don't do too much after each request. Remember to only write" \
-    " json. S start with { ... etc. Do use print statements, as we do not print your last commands like in notebooks"
+MAX_OUTPUT_LENGTH = 600
 
+PROMPT = "You are a creative rockstar data scientist. Your task is to analyse a data source, this is a file " \
+    "called FILENAME you can execute python commands only. " \
+    "Each of your outputs should be in strictly in json format. Your json must have two keys: " \
+    "'comment': should be a pretty short comment about what you are doing or what you are finding out " \
+    " (remember to keep it short even feel free to leave it empty if you are nothing interesting to say), " \
+    "'python': should be a string containing a valid python code including imports if needed, " \
+    " while keeping it short do use newlines in between statements and use 2 spaces for indentation. " \
+    f"max {MAX_OUTPUT_LENGTH} characters of the results will be returned to you, " \
+    f"might be an error in which case you should correct " \
+    "yourself by writing better code. Don't do too much after each request. If something does not work feel free " \
+    "to try something totally different instead. Be clever and creative in your analysis. Remember to only " \
+    "write json. Start with { ... etc. Use print statements, as we do not print your last commands like in notebooks" \
+    "If you are finished, just write 'exit', nothing else, and we will stop."
 
-openai.api_key = 'sk-...'
-
-
-Prompt = List[Dict[str, str]]
-
-
-# The directory where the cache files will be stored
-# This should be set to a directory that is not in the project directory
-# set relative to this file
-CACHE_DIR = os.path.dirname(os.path.abspath(__file__)) + '/cache'
+PROMPT_SUMMARY = "Now please write a summary of the analysis above. Including the most interesting insights." \
+                 " Do not write your output in json anymore, instead write in markdown."
 
 
-def cache_to_disk(func, file_suffix=''):
-    def wrapper(*args, **kwargs):
-        # Serialize arguments using pickle
-        serialized_args = pickle.dumps((args, kwargs))
+def next_step(full_prompt_history: Prompt, exec_variables: dict):
+    new_prompt_messages = []
 
-        # Create a hash of the serialized arguments
-        hashed_args = hashlib.sha1(serialized_args).hexdigest()
+    valid_message = False
+    while not valid_message:
+        res = chat_api(full_prompt_history + new_prompt_messages, seed=0)
+        res_str = res.choices[0]["message"]["content"]
+        new_prompt_messages.append({'role': 'assistant', 'content': str(res_str)})
 
-        file_name = f'{func.__module__}__{func.__qualname__}{file_suffix}'
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        # Open the shelve cache
-        with shelve.open(CACHE_DIR+'/'+file_name) as cache:
-            # Check if the cache key exists, if so, load the cached result
-            if hashed_args in cache:
-                return cache[hashed_args]
+        if res_str == 'exit':
+            return None
 
-            # If the cache key does not exist, call the function and store the result
-            result = func(*args, **kwargs)
-            cache[hashed_args] = result
+        try:
+            res_data = json.loads(res_str)
+            if 'exit' in res_data.values():
+                print(res_data)
+                return None
+            valid_message = True
+        except Exception as ex:
+            print(res_str)
+            msg = f'Please respond with a valid json or exit (error while parsing json: ${str(ex)})'
+            print("# Invalid json:")
+            print(msg)
+            new_prompt_messages.append(
+                {'role': 'system', 'content': f'Please always only respond with a valid json (${str(ex)})'}
+            )
 
-        return result
+    # noinspection PyUnboundLocalVariable
+    report_item = res_data.copy()
 
-    return wrapper
+    if 'comment' in res_data:
+        print("## Extracting comment:")
+        print(res_data['comment'])
+    if 'python' in res_data:
+        print("## Extracting python code:")
+        print('----------------------------------------')
+        print(res_data['python'])
+        print('----------------------------------------')
+        print('## Do you want to execute this code? (y/N)')
+        if input() in ['y', 'Y']:
+            try:
+                with capture_output() as (stdout_buf, stderr_buf):
+                    exec(res_data['python'], exec_variables)
+                out = ''
+            except Exception as ex:
+                out = f"Got exception: ${ex}"
+            finally:
+                stderr = stderr_buf.getvalue()
+                stdout = stdout_buf.getvalue()
+                if stderr:
+                    # noinspection PyUnboundLocalVariable
+                    out += f'error:\n{stderr[:round(MAX_OUTPUT_LENGTH/3)]}\n'
+            if stdout:
+                out += f'output:\n{stdout}'
 
-
-@cache_to_disk
-def chat_api(messages: Prompt, model: str = 'gpt-4', seed: int = 0, **kwargs):
-    # seed is just for caching purposes
-    return openai.ChatCompletion.create(
-        model=model,
-        messages=messages,
-        *kwargs
-    )
+            out = out[:MAX_OUTPUT_LENGTH]
+            print("## Output:")
+            print(out)
+            new_prompt_messages.append({'role': 'user', 'content': out})
+            report_item['output'] = out
+    return new_prompt_messages, report_item
 
 
 def main():
-    messages = [{'role': 'system', 'content': PROMPT}]
-    while True:
+    print("What file do you want to analyse? (press enter for default: food-enforcement.json)\n > ", end='')
+    file_name = input().strip()
+    if not file_name:
+        file_name = 'food-enforcement.json'
+    messages = [{'role': 'system', 'content': PROMPT.replace('FILENAME', file_name)}]
+    exec_variables = {}
+    report_items = []
+    try:
+        while True:
+            res = next_step(messages, exec_variables)
+            if res is None:
+                break
+            new_messages, report_item = res
+            messages.extend(new_messages)
+            report_items.append(report_item)
+    finally:
+        messages.append({'role': 'system', 'content': PROMPT_SUMMARY})
         res = chat_api(messages, seed=0)
-        res_str = res.choices[0]["message"]["content"]
-        messages.append({'role': 'assistant', 'content': str(res_str)})
-        print("# Assistant:")
-        print(res_str)
-        try:
-            res_data = json.loads(res_str)
-        except Exception as ex:
-            msg = f'Please always only respond with a valid json (${str(ex)})'
-            print("# System:")
-            print(msg)
-            messages.append({'role': 'system', 'content': f'Please always only respond with a valid json (${str(ex)})'})
-            continue
+        summary = res.choices[0]["message"]["content"]
+        save_report(report_items, summary, file_name)
 
-        if 'comment' in res_data:
-            print("## Extracting comment:")
-            print(res_data['comment'])
-        if 'python' in res_data:
-            print("## Extracting python code:")
-            print(res_data['python'])
-            # ask user if he wants to execute
-            print('## Do you want to execute this code? (y/n)')
-            if input() == 'y':
-                # execute and save std out result in out
-                try:
-                    # Save the current stdout and stderr
-                    original_stdout = sys.stdout
-                    original_stderr = sys.stderr
 
-                    # Create a StringIO buffer to store the output and error
-                    captured_stdout = io.StringIO()
-                    captured_stderr = io.StringIO()
+REPORT_DIR = os.path.dirname(os.path.abspath(__file__)) + '/reports'
 
-                    # Redirect stdout and stderr to the buffer
-                    sys.stdout = captured_stdout
-                    sys.stderr = captured_stderr
-                    exec(res_data['python'])
-                    out = ''
-                except Exception as ex:
-                    out = f"Got exception: ${ex}"
-                finally:
-                    # Restore the original stdout and stderr
-                    sys.stdout = original_stdout
-                    sys.stderr = original_stderr
 
-                    # Get the output and error as strings
-                    output = captured_stdout.getvalue()
-                    error = captured_stderr.getvalue()
+def save_report(history: List[dict], summary, analyzed_file_name):
+    # generate a short random file name starting with current date time
+    file_name = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name += hashlib.sha1(os.urandom(32)).hexdigest()[:8]
+    os.makedirs(REPORT_DIR, exist_ok=True)
+    # save report as markdown file
+    with open(REPORT_DIR+'/'+file_name+'.md', 'w') as file:
+        file.write('# Report\n')
+        file.write(f'File: *{analyzed_file_name}*\n\n')
+        for item in history:
+            if 'comment' in item:
+                file.write(item['comment'])
+                file.write('\n\n')
+            if 'python' in item:
+                file.write('```python\n')
+                file.write(item['python'].strip())
+                file.write('\n```\n\n')
+            if 'output' in item:
+                file.write('```json\n')
+                file.write(item['output'])
+                file.write('\n```\n\n')
+        file.write('# Summary\n')
+        file.write(summary)
+    print(f'Report saved to {REPORT_DIR}/{file_name}.md')
 
-                    # Close the StringIO buffer
-                    stdout = captured_stdout.getvalue()
-                    stderr = captured_stderr.getvalue()
-                    captured_stdout.close()
-                    captured_stderr.close()
-                if stdout:
-                    out += f'\n\noutput:\n{stdout}'
-                if stderr:
-                    out += f'\n\nerror:\n{stderr}'
-                print("# User:")
-                print(out)
-                messages.append({'role': 'user', 'content': out})
 
 if __name__ == '__main__':
-   main()
+    main()
