@@ -3,7 +3,6 @@
 
 This project demonstrates an automatic scientist powered by the GPT-4 language model. The primary goal is to perform data analysis autonomously by executing a series of Python commands. The user is only involved in checking the generated Python code for security reasons before execution.
 
-# Link to example reports
 [Here are](./reports/20230404_202938d2d8a762.md) [some example reports](./reports/20230404_192436cf1fbf65.md) [generated](./reports/20230404_20464248efda6b.md) [by the model](./reports/20230404_2130387a296c68.md).
 
 The process starts by asking the user for the input file to analyze. If not provided, the default file 'food-enforcement.json' will be used. The GPT-4 model is then prompted to generate Python code for the analysis. The output from the model is expected to be in JSON format, which allows for a structured and clear communication between the model and the program.
